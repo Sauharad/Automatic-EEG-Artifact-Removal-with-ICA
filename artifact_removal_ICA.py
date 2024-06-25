@@ -1,6 +1,9 @@
 import mne
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.decomposition import FastICA
+from scipy.signal import find_peaks
+from pywt import wavedec, waverec
 
 #Loading the Dataset
 sample_data_folder = mne.datasets.sample.data_path()
@@ -14,19 +17,22 @@ raw = mne.io.read_raw_fif(sample_data_raw_file,preload=True)
 raw.pick(picks='eeg')
 raw.drop_channels(ch_names=raw.info['bads'])
 sfreq = raw.info['sfreq']
+raw.crop(tmin=0,tmax=5)
 raw.filter(l_freq=1.0, h_freq=40.0)
 
 orig = raw.copy()
 
+data = raw.get_data()
+
 #ICA Decomposition of 20 Components
 
-ica = mne.preprocessing.ICA(n_components=20, random_state=97, max_iter=800)
-ica.fit(raw)
+ica = FastICA(n_components=20, random_state=97, max_iter=800)
+sources = ica.fit_transform(data.T)
 
-ica_comps = ica.get_sources(raw)
-sources = ica_comps.get_data()
+sources = sources.T
 
-mixing_matrix = ica.mixing_matrix_
+mixing_matrix = ica.mixing_
+print(mixing_matrix.shape)
 
 #Selecting the Frontal EEG Channels
 
@@ -69,17 +75,45 @@ threshold = np.percentile(list(weight_vector.values()),75) + 1.5 * (np.percentil
 artifact_components = [j for j in weight_vector if weight_vector[j] >= threshold]
 print(artifact_components)
 
-#Removing the Artifacted Component from ICA Reconstructiom
+#Localizing EOG peaks within the Artifacted Component
 
-ica.exclude = artifact_components
+for i in artifact_components:
+    #Localizing EOG peaks within the Artifacted Component.
 
-#Applying ICA
+    threshold = np.mean(sources[i])
+    peaks = find_peaks(sources[i],height = threshold, distance = int(sfreq/2))
+    peaks = peaks[0]
+    for j in peaks:
+        
+        #Creating 1 second Epochs around the peaks
 
-ica.apply(raw)
+        print(j,j-int(sfreq/2),j+int(sfreq/2))
+        if (j-int(sfreq/2)) <= 0:
+            epoch = sources[i][0:j+int(sfreq/2)]
+        else:
+            epoch = sources[i][j-int(sfreq/2):j+int(sfreq/2)]
+
+        # Reconstructing the independent component from only the high frequency bands of the wavelet decomposition
+        coeffs = wavedec(epoch,'sym4',level=5)
+        for k in range(0,len(coeffs)-2):
+            coeffs[k] = np.zeros(coeffs[k].shape)
+        cleaned_epoch = waverec(coeffs,'sym4')
+        if (j-int(sfreq/2)) <= 0:
+            sources[i][0:j+int(sfreq/2)+1] = cleaned_epoch
+        else:
+            sources[i][j-int(sfreq/2):j+int(sfreq/2)] = cleaned_epoch[0:len(sources[i][j-int(sfreq/2):j+int(sfreq/2)])]
+ 
+#Reconstructing the Signal
+
+filtered = np.dot(sources.T,mixing_matrix.T)
+filtered = filtered.T
 
 #Visualising the Original and Denoised Signals
 
+new = mne.io.RawArray(filtered,raw.info)
+
 orig.plot()
-raw.plot()
+
+new.plot()
 
 plt.show()
